@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CookQuest — ゆるモンスターを料理で討伐</title>
+  <meta name="description" content="料理が苦手でも大丈夫。気分や冷蔵庫の食材からAIがレシピを提案し、完成の料理パワーでゆるーいモンスターを倒す楽しい料理RPG。" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Mochiy+Pop+One&family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="bg-glow" aria-hidden="true"></div>
+  <div class="bg-runes" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand" data-action="home">
+      <span class="brand-mark">CQ</span>
+      <div>
+        <p class="brand-name">CookQuest</p>
+        <p class="brand-sub">ゆるモン討伐キッチン</p>
+      </div>
+    </div>
+    <div class="player-hud" id="player-hud">
+      <div class="stat">
+        <span class="stat-label">Lv</span>
+        <strong id="hud-level">1</strong>
+      </div>
+      <div class="stat">
+        <span class="stat-label">討伐</span>
+        <strong id="hud-defeated">0</strong>
+      </div>
+      <div class="stat wide">
+        <span class="stat-label">次の難易度</span>
+        <strong id="hud-difficulty">★1</strong>
+      </div>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- HOME -->
+    <section class="screen active" id="screen-home" data-screen="home">
+      <div class="hero-stage">
+        <div class="hero-copy">
+          <p class="eyebrow">Cute Monster Cooking RPG</p>
+          <h1 class="hero-title">CookQuest</h1>
+          <p class="hero-lead">キッチンが戦場だ。ゆるーいモンスターを、できたての料理パワーで倒せ。</p>
+          <div class="cta-row">
+            <button type="button" class="btn btn-gold" data-action="start-mood">今日の気分から冒険</button>
+            <button type="button" class="btn btn-ghost" data-action="start-fridge">冷蔵庫の食材で冒険</button>
+          </div>
+        </div>
+        <aside class="enemy-panel" id="home-enemy-panel">
+          <p class="panel-label">出現中のゆるモンスター</p>
+          <div class="enemy-art-wrap">
+            <img id="home-enemy-img" alt="ゆるモンスターのイメージ" width="420" height="420" />
+            <div class="enemy-glow"></div>
+          </div>
+          <h2 id="home-enemy-name">はらぺこタマゴん</h2>
+          <p id="home-enemy-flavor" class="enemy-flavor">ぽよぽよお腹がぐうぐう。温かい料理でノックアウトだ！</p>
+          <div class="hp-block">
+            <div class="hp-meta">
+              <span>HP</span>
+              <span id="home-enemy-hp-text">100 / 100</span>
+            </div>
+            <div class="hp-bar" aria-hidden="true"><div class="hp-fill" id="home-enemy-hp-fill"></div></div>
+          </div>
+        </aside>
+      </div>
+      <p class="howto">使い方：気分アンケート or 食材選択 → AIがレシピ提案 → 作って「できた！」で攻撃 → 討伐するほど難易度アップ</p>
+      <p class="howto">
+        <button type="button" class="btn btn-ghost" data-action="check-connection">接続チェック</button>
+        <button type="button" class="btn btn-ghost" data-action="test-gemini-image">Gemini画像テスト</button>
+      </p>
+    </section>
+
+    <!-- MOOD -->
+    <section class="screen" id="screen-mood" data-screen="mood">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>今日の気分を占う</h2>
+          <p>5段階で答えてね。正解はないよ。</p>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="mood-progress"></div></div>
+        <p class="progress-label" id="mood-progress-label">1 / 10</p>
+        <div id="mood-question" class="mood-card"></div>
+        <div class="nav-row">
+          <button type="button" class="btn btn-ghost" data-action="mood-back" id="mood-back" disabled>戻る</button>
+          <button type="button" class="btn btn-gold" data-action="mood-next" id="mood-next">次へ</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- FRIDGE -->
+    <section class="screen" id="screen-fridge" data-screen="fridge">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>冷蔵庫クエスト</h2>
+          <p>ある食材をタップ。足りないものは自分で追加しよう。</p>
+        </div>
+        <div class="chip-groups" id="ingredient-groups"></div>
+        <div class="custom-add">
+          <input type="text" id="custom-ingredient" placeholder="例：残りご飯、納豆…" maxlength="40" />
+          <button type="button" class="btn btn-gold" data-action="add-ingredient">追加</button>
+        </div>
+        <div class="selected-box">
+          <p class="selected-label">選択中</p>
+          <div id="selected-ingredients" class="selected-list"></div>
+        </div>
+        <div class="nav-row">
+          <button type="button" class="btn btn-ghost" data-action="home">戻る</button>
+          <button type="button" class="btn btn-gold" data-action="fridge-submit" id="fridge-submit" disabled>この食材で提案</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- LOADING -->
+    <section class="screen" id="screen-loading" data-screen="loading">
+      <div class="loading-card">
+        <div class="cauldron" aria-hidden="true">
+          <div class="cauldron-body"></div>
+          <div class="bubble b1"></div>
+          <div class="bubble b2"></div>
+          <div class="bubble b3"></div>
+        </div>
+        <h2>お鍋がぐつぐつ…</h2>
+        <p id="loading-text">AI師匠がレシピを考え中</p>
+      </div>
+    </section>
+
+    <!-- RECIPE -->
+    <section class="screen" id="screen-recipe" data-screen="recipe">
+      <div class="recipe-layout">
+        <article class="panel recipe-main">
+          <div class="recipe-header">
+            <p class="eyebrow" id="recipe-real-name"></p>
+            <h2 id="recipe-title"></h2>
+            <p id="recipe-summary"></p>
+            <div class="badge-row">
+              <span class="badge" id="recipe-diff"></span>
+              <span class="badge power" id="recipe-power"></span>
+              <span class="badge" id="recipe-time"></span>
+              <span class="badge" id="recipe-servings"></span>
+            </div>
+          </div>
+          <div class="recipe-cols">
+            <div>
+              <h3>材料</h3>
+              <ul id="recipe-ingredients" class="ing-list"></ul>
+            </div>
+            <div>
+              <h3>手順</h3>
+              <ol id="recipe-steps" class="step-list"></ol>
+            </div>
+          </div>
+          <p class="encourage" id="recipe-encourage"></p>
+          <button type="button" class="btn btn-attack" data-action="complete-cook" id="btn-complete">できた！ 料理パワーで攻撃</button>
+        </article>
+
+        <aside class="panel recipe-side">
+          <div class="mini-enemy">
+            <img id="recipe-enemy-img" alt="対戦中のゆるモンスター" width="280" height="280" />
+            <h3 id="recipe-enemy-name"></h3>
+            <div class="hp-block">
+              <div class="hp-meta"><span>HP</span><span id="recipe-enemy-hp-text"></span></div>
+              <div class="hp-bar"><div class="hp-fill" id="recipe-enemy-hp-fill"></div></div>
+            </div>
+            <p class="enemy-flavor" id="recipe-enemy-taunt"></p>
+          </div>
+
+          <div class="ask-box">
+            <h3>わからないところを聞く</h3>
+            <div id="faq-buttons" class="faq-buttons"></div>
+            <div class="custom-add">
+              <input type="text" id="ask-input" placeholder="例：弱火ってどのくらい？" maxlength="120" />
+              <button type="button" class="btn btn-gold" data-action="ask-ai">質問</button>
+            </div>
+            <div id="ask-answer" class="ask-answer hidden"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- BATTLE RESULT -->
+    <section class="screen" id="screen-battle" data-screen="battle">
+      <div class="battle-card panel">
+        <p class="eyebrow" id="battle-eyebrow">攻撃成功</p>
+        <h2 id="battle-title">料理パワー発動！</h2>
+        <div class="battle-visual">
+          <img id="battle-enemy-img" alt="ゆるモンスター" width="320" height="320" />
+          <div class="damage-float" id="damage-float"></div>
+        </div>
+        <p id="battle-message"></p>
+        <div class="hp-block">
+          <div class="hp-meta"><span>HP</span><span id="battle-hp-text"></span></div>
+          <div class="hp-bar"><div class="hp-fill" id="battle-hp-fill"></div></div>
+        </div>
+        <div class="cta-row">
+          <button type="button" class="btn btn-gold" data-action="home" id="battle-home">拠点へ戻る</button>
+          <button type="button" class="btn btn-ghost hidden" data-action="next-enemy" id="battle-next">次のモンスターへ</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="js/data.js"></script>
+  <script src="js/images.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
