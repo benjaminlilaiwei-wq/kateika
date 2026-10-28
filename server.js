@@ -14,8 +14,49 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
+function cleanEnvValue(value) {
+  if (value == null) return "";
+  let v = String(value).trim();
+  // Render / .env で "..." や '...' 付きになりがち
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'"))
+  ) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
 function env(name, fallback = "") {
-  return (process.env[name] || fallback).trim();
+  return cleanEnvValue(process.env[name] || fallback);
+}
+
+function firstEnv(names, fallback = "") {
+  for (const name of names) {
+    const v = env(name);
+    if (v) return v;
+  }
+  return fallback;
+}
+
+function openaiApiKey() {
+  // OPENAI_MODEL はモデル名。キーは OPENAI_API_KEY
+  return firstEnv(["OPENAI_API_KEY", "OPENAI_KEY"]);
+}
+
+function geminiApiKey() {
+  return firstEnv(["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY"]);
+}
+
+function isQuotaError(message) {
+  const m = String(message || "").toLowerCase();
+  return (
+    m.includes("rate limit") ||
+    m.includes("quota") ||
+    m.includes("resource_exhausted") ||
+    m.includes("limit: 0") ||
+    m.includes("exceeded")
+  );
 }
 
 function clampInt(value, min, max, fallback) {
@@ -40,9 +81,13 @@ function readBody(req) {
 }
 
 async function openaiChat(messages, temperature = 0.7) {
-  const apiKey = env("OPENAI_API_KEY");
+  const apiKey = openaiApiKey();
   if (!apiKey) {
-    return { ok: false, error: "OPENAI_API_KEY が未設定です。" };
+    return {
+      ok: false,
+      error:
+        "OPENAI_API_KEY が未設定です。Render の Environment に KEY=OPENAI_API_KEY を追加してください（OPENAI_MODEL は gpt-4o-mini などのモデル名用です）。",
+    };
   }
   const model = env("OPENAI_MODEL", "gpt-4o-mini");
 
@@ -148,27 +193,52 @@ async function geminiHttp(url, apiKey, payload) {
   return { status: res.status, raw, json };
 }
 
-async function generateGeminiImage(prompt, kind = "step") {
-  const apiKey = env("GEMINI_API_KEY");
+function buildImagePrompt(prompt, kind = "step") {
+  if (kind === "enemy") {
+    return `${prompt}. Cute kawaii chibi food monster mascot, soft pastel colors, playful rival vibe, not scary, no text, no watermark.`;
+  }
+  return `${prompt}. Close-up food photography of ingredients and cooking process. Focus on food, utensils, and hands from wrists down only if needed. No faces, no portraits, no full-body people, no characters, no text, no watermark. Bright kitchen counter, soft natural light.`;
+}
+
+async function generatePollinationsImage(prompt, kind = "step") {
+  const fullPrompt = buildImagePrompt(prompt, kind);
+  const width = kind === "enemy" ? 768 : 640;
+  const height = kind === "enemy" ? 768 : 480;
+  const seed = Date.now() % 1e9;
+  const url =
+    `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}` +
+    `?width=${width}&height=${height}&nologo=true&seed=${seed}`;
+
+  const res = await fetch(url, {
+    headers: { Accept: "image/*" },
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `Pollinations 画像取得に失敗 (HTTP ${res.status})`,
+    };
+  }
+  const mime = res.headers.get("content-type") || "image/jpeg";
+  const buf = Buffer.from(await res.arrayBuffer());
+  // Pollinations の制限画像でも MIME は image/* になることがある
+  return {
+    ok: true,
+    mime,
+    data: buf.toString("base64"),
+    provider: "pollinations",
+    url,
+  };
+}
+
+async function generateGeminiImageOnly(prompt, kind = "step") {
+  const apiKey = geminiApiKey();
   if (!apiKey) {
     return { ok: false, error: "GEMINI_API_KEY が未設定です。" };
   }
 
-  const fullPrompt =
-    kind === "enemy"
-      ? `Create an image: ${prompt}. Cute kawaii chibi food monster mascot, soft pastel colors, playful rival vibe, not scary, no text, no watermark.`
-      : `Create an image: ${prompt}. Close-up food photography of ingredients and cooking process. Focus on food, utensils, and hands from wrists down only if needed. No faces, no portraits, no full-body people, no characters, no text, no watermark. Bright kitchen counter, soft natural light.`;
-
+  const fullPrompt = `Create an image: ${buildImagePrompt(prompt, kind)}`;
   const preferred = env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image");
-  const models = [
-    ...new Set([
-      preferred,
-      "gemini-2.5-flash-image",
-      "gemini-nano-banana-2.1",
-      "gemini-3.1-flash-image",
-      "gemini-2.0-flash-preview-image-generation",
-    ]),
-  ];
+  const models = [...new Set([preferred, "gemini-2.5-flash-image"])];
 
   const attempts = [];
   let lastError = "画像を生成できませんでした。";
@@ -207,6 +277,10 @@ async function generateGeminiImage(prompt, kind = "step") {
         attempt.error = msg;
         attempts.push(attempt);
         lastError = msg;
+        // Free Tier limit:0 などは他モデルも同じなのですぐ打ち切り
+        if (isQuotaError(msg)) {
+          return { ok: false, error: msg, attempts, quota: true };
+        }
         continue;
       }
 
@@ -233,58 +307,41 @@ async function generateGeminiImage(prompt, kind = "step") {
     }
   }
 
-  // Interactions API fallback
-  for (const model of [...new Set([preferred, "gemini-nano-banana-2.1", "gemini-2.5-flash-image"])]) {
-    const url = "https://generativelanguage.googleapis.com/v1beta/interactions";
-    const payload = {
-      model,
-      input: fullPrompt,
-      response_format: [
-        { type: "image", aspect_ratio: kind === "enemy" ? "1:1" : "4:3" },
-      ],
-    };
+  return { ok: false, error: lastError, attempts };
+}
 
-    let res;
-    try {
-      res = await geminiHttp(url, apiKey, payload);
-    } catch (err) {
-      const msg = `接続失敗: ${err.message || err}`;
-      attempts.push({ model, api: "v1beta/interactions", error: msg });
-      lastError = msg;
-      continue;
-    }
+async function generateImage(prompt, kind = "step") {
+  const mode = env("IMAGE_PROVIDER", "auto").toLowerCase(); // auto | gemini | pollinations
 
-    const attempt = { model, api: "v1beta/interactions", http: res.status };
-    if (res.status >= 400) {
-      const msg = res.json?.error?.message || `HTTP ${res.status}`;
-      attempt.error = msg;
-      attempts.push(attempt);
-      lastError = msg;
-      continue;
-    }
-
-    const img = extractGeminiImage(res.json);
-    if (img) {
-      return {
-        ok: true,
-        mime: img.mime,
-        data: img.data,
-        provider: "gemini",
-        model,
-        api: "v1beta/interactions",
-      };
-    }
-    attempt.error = "画像パーツなし（interactions）";
-    attempts.push(attempt);
-    lastError = attempt.error;
+  if (mode === "pollinations") {
+    return generatePollinationsImage(prompt, kind);
   }
 
-  return {
-    ok: false,
-    error: lastError,
-    hint: "Render の Environment に GEMINI_API_KEY を設定し、AI Studio で画像モデルが使えるか確認してください。",
-    attempts,
-  };
+  if (mode === "gemini") {
+    return generateGeminiImageOnly(prompt, kind);
+  }
+
+  // auto: Gemini → 失敗/枠なしなら Pollinations
+  if (geminiApiKey()) {
+    const gemini = await generateGeminiImageOnly(prompt, kind);
+    if (gemini.ok) return gemini;
+    const fallback = await generatePollinationsImage(prompt, kind);
+    if (fallback.ok) {
+      return {
+        ...fallback,
+        fallback_from: "gemini",
+        gemini_error: gemini.error,
+      };
+    }
+    return {
+      ok: false,
+      error: gemini.error || fallback.error,
+      attempts: gemini.attempts,
+      hint: "Gemini無料枠の画像生成が 0 のため失敗しました。課金するか IMAGE_PROVIDER=pollinations を使ってください。",
+    };
+  }
+
+  return generatePollinationsImage(prompt, kind);
 }
 
 const SUGGEST_SYSTEM = `あなたはファンタジー世界の料理キッチン「CookQuest」の師匠AIです。
@@ -327,16 +384,22 @@ JSONスキーマ:
 - トーンは明るく親しみやすいが、討伐・バトル感は残す`;
 
 function pingHandler(_req, res) {
+  const hasOpenAI = Boolean(openaiApiKey());
+  const hasGemini = Boolean(geminiApiKey());
   res.json({
     ok: true,
     message: "CookQuest API 応答OK (Render/Node)",
     has_config_local: true,
     has_curl: true,
-    has_api_key: Boolean(env("OPENAI_API_KEY")),
-    has_openai_key: Boolean(env("OPENAI_API_KEY")),
-    has_gemini_key: Boolean(env("GEMINI_API_KEY")),
+    has_api_key: hasOpenAI,
+    has_openai_key: hasOpenAI,
+    has_gemini_key: hasGemini,
     openai_model: env("OPENAI_MODEL", "gpt-4o-mini"),
     gemini_image_model: env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
+    image_provider: env("IMAGE_PROVIDER", "auto"),
+    hint: hasOpenAI
+      ? null
+      : "OPENAI_API_KEY を Environment に追加してください（OPENAI_MODEL だけではレシピ提案できません）。",
   });
 }
 app.get(["/api/ping", "/api/ping.php"], pingHandler);
@@ -471,7 +534,7 @@ app.all(["/api/gemini-image", "/api/gemini-image.php"], upload.none(), async (re
       return res.status(400).json({ ok: false, error: "prompt が空です。" });
     }
 
-    const result = await generateGeminiImage(prompt, kind);
+    const result = await generateImage(prompt, kind);
     if (!result.ok) {
       return res.status(502).json(result);
     }

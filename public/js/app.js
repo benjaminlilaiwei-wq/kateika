@@ -83,12 +83,11 @@
       if (!data.ok) throw new Error(data.error || "ping失敗");
       const bits = [
         "接続OK",
-        data.has_config_local ? "設定あり" : "config.local.phpなし",
-        data.has_api_key ? "OpenAIあり" : "OpenAIなし",
-        data.has_gemini_key ? "Geminiあり" : "Geminiなし",
-        data.has_curl ? "cURLあり" : "cURLなし",
+        data.has_openai_key || data.has_api_key ? "OPENAI_API_KEYあり" : "OPENAI_API_KEYなし",
+        data.has_gemini_key ? "GEMINI_API_KEYあり" : "GEMINI_API_KEYなし",
+        `画像=${data.image_provider || "auto"}`,
       ];
-      toast(bits.join(" / "));
+      toast(bits.join(" / ") + (data.hint ? ` / ${data.hint}` : ""), 7000);
     } catch (err) {
       toast(err.message || "接続チェック失敗");
     }
@@ -99,25 +98,25 @@
       toast("公開URLで開いてからテストしてね。");
       return;
     }
-    toast("Gemini画像をテスト中…（最大1分）", 8000);
+    toast("画像生成をテスト中…（最大1分）", 8000);
     try {
-      const res = await fetch(apiUrl("api/gemini-image.php?test=1"), {
+      const res = await fetch(apiUrl("api/gemini-image?test=1"), {
         credentials: "same-origin",
         cache: "no-store",
       });
       const text = await res.text();
-      if (/aes\.js|requires Javascript/i.test(text)) {
-        toast("セキュリティ確認中。ページを再読み込みしてね。");
-        return;
-      }
       const data = JSON.parse(text);
       if (!data.ok) {
-        const detail = data.attempts && data.attempts[0] ? ` / ${data.attempts[0].error}` : "";
-        throw new Error((data.error || "失敗") + detail);
+        throw new Error(data.error || "失敗");
       }
-      toast(`Gemini画像OK（${data.model || "model"}）`);
+      const via = data.provider || "unknown";
+      toast(
+        via === "pollinations"
+          ? `画像OK（Pollinations代替 / Gemini枠なし）`
+          : `画像OK（${via}${data.model ? " / " + data.model : ""}）`
+      );
     } catch (err) {
-      toast(err.message || "Gemini画像テスト失敗", 8000);
+      toast(err.message || "画像テスト失敗", 8000);
     }
   }
 

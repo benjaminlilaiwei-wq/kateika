@@ -1,8 +1,7 @@
 window.CQImages = {
-  // Free Pollinations fallback (slow: ~1 image / 45s)
   base: "https://image.pollinations.ai/prompt/",
-  provider: "gemini", // "gemini" | "pollinations"
-  gapMs: 1500,
+  provider: "auto", // auto uses server: Gemini then Pollinations
+  gapMs: 1200,
   pollinationsGapMs: 48000,
   _queue: [],
   _busy: false,
@@ -39,7 +38,6 @@ window.CQImages = {
     return `${this.base}${encodeURIComponent(clean)}?width=${width}&height=${height}&nologo=true&seed=${seed}`;
   },
 
-  /** @deprecated for direct <img src>, prefer enqueuePrompt */
   enemy(enemy, seed) {
     return this.pollinationsUrl(this.enemyPrompt(enemy), { width: 768, height: 768, seed });
   },
@@ -69,29 +67,26 @@ window.CQImages = {
   },
 
   _gap() {
-    return this.provider === "pollinations" ? this.pollinationsGapMs : this.gapMs;
+    return this.gapMs;
   },
 
   _cacheKey(prompt, kind) {
     return `${kind}::${prompt}`;
   },
 
-  async _generateGemini(prompt, kind) {
+  async _generateViaServer(prompt, kind) {
     const key = this._cacheKey(prompt, kind);
     if (this._cache[key]) return this._cache[key];
 
     const form = new FormData();
     form.append("data", JSON.stringify({ prompt, kind }));
-    const res = await fetch(this.apiUrl("api/gemini-image.php"), {
+    const res = await fetch(this.apiUrl("api/gemini-image"), {
       method: "POST",
       body: form,
       credentials: "same-origin",
       cache: "no-store",
     });
     const text = await res.text();
-    if (/aes\.js|requires Javascript/i.test(text)) {
-      throw new Error("セキュリティ確認が必要です。ページを再読み込みしてね");
-    }
     let data;
     try {
       data = JSON.parse(text);
@@ -101,7 +96,7 @@ window.CQImages = {
     if (!data.ok) throw new Error(data.error || "画像生成に失敗しました");
     const url = `data:${data.mime || "image/png"};base64,${data.data}`;
     this._cache[key] = url;
-    return url;
+    return { url, provider: data.provider || "unknown" };
   },
 
   _pump() {
@@ -136,30 +131,47 @@ window.CQImages = {
           };
           img.onerror = () => resolve(false);
           img.src = url;
-          setTimeout(() => resolve(img.complete), 60000);
+          setTimeout(() => resolve(!!img.complete), 60000);
         });
 
       try {
         let url;
+        let provider = "url";
         if (next.type === "url") {
           url = next.url;
-        } else if (this.provider === "gemini") {
-          url = await this._generateGemini(next.prompt, next.kind);
         } else {
-          url = this.pollinationsUrl(next.prompt, {
-            width: next.kind === "enemy" ? 768 : 640,
-            height: next.kind === "enemy" ? 768 : 480,
-          });
+          const result = await this._generateViaServer(next.prompt, next.kind);
+          url = result.url;
+          provider = result.provider;
+          if (provider === "pollinations") {
+            this._setStatus(statusEl, "代替画像サービスで表示中…");
+          }
         }
 
         const ok = await showUrl(url);
+        if (!ok) this._setStatus(statusEl, "画像の表示に失敗しました");
+        else done();
         if (!ok) {
-          this._setStatus(statusEl, "画像の表示に失敗しました");
+          this._busy = false;
+          setTimeout(() => this._pump(), this._gap());
         }
-        done();
       } catch (err) {
         console.error(err);
-        // Geminiエラーを隠さず表示（Pollinationsへ黙って逃がさない）
+        // 最後の保険: ブラウザから Pollinations 直読み
+        try {
+          this._setStatus(statusEl, "代替画像を表示中…");
+          const fb = this.pollinationsUrl(next.prompt, {
+            width: next.kind === "enemy" ? 768 : 640,
+            height: next.kind === "enemy" ? 768 : 480,
+          });
+          const ok = await showUrl(fb);
+          if (ok) {
+            done();
+            return;
+          }
+        } catch (_) {
+          /* ignore */
+        }
         this._setStatus(statusEl, err.message || "画像の取得に失敗しました");
         this._busy = false;
         setTimeout(() => this._pump(), this._gap());

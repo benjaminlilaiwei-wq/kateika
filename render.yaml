@@ -14,5 +14,7 @@ services:
         value: gpt-4o-mini
       - key: GEMINI_IMAGE_MODEL
         value: gemini-2.5-flash-image
+      - key: IMAGE_PROVIDER
+        value: auto
       - key: NODE_VERSION
         value: "20"
