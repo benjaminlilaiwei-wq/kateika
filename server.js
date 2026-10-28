@@ -101,7 +101,7 @@ async function openaiChat(messages, temperature = 0.7) {
       model,
       temperature,
       response_format: { type: "json_object" },
-      max_tokens: 1800,
+      max_tokens: 3200,
       messages,
     }),
   });
@@ -345,43 +345,100 @@ async function generateImage(prompt, kind = "step") {
 }
 
 const SUGGEST_SYSTEM = `あなたはファンタジー世界の料理キッチン「CookQuest」の師匠AIです。
-料理が苦手・嫌いな初心者でも楽しめるよう、やさしく、ゲーム感覚でレシピを提案してください。
+料理が苦手・嫌い・初めての人でも失敗しにくいよう、やさしく論理的で自然な日本語でレシピを提案してください。
 世界観は「ゆるーいモンスターを料理パワーで倒すクッキングRPG」です。見た目はかわいいが、対戦はちゃんと討伐です。
+画像は出さないので、文章だけで手が動くレベルまで詳しく書いてください。
 必ず JSON オブジェクトのみで返答してください。日本語で書いてください。
 
 JSONスキーマ:
 {
   "title": "料理名（ファンタジー風の別名も少し混ぜてよい）",
   "realName": "一般的な料理名",
-  "summary": "1〜2文の紹介",
+  "summary": "何が得られるか・どのくらい簡単かを含む2〜3文",
   "difficulty": 1から10の整数（依頼された難易度に近い値）,
   "cookPower": 難易度に応じた攻撃力（だいたい difficulty * 12 + 8 前後）,
   "timeMinutes": 所要時間の目安（整数）,
   "servings": "人数の目安",
-  "ingredients": ["材料 分量", "..."],
+  "prepChecklist": ["始める前に揃えるもの・確認すること"],
+  "ingredients": ["材料 分量（計量しやすい書き方）", "..."],
   "steps": [
     {
       "order": 1,
-      "text": "手順説明（短く具体的に）",
-      "tip": "初心者向けの一言ヒント",
-      "imagePrompt": "英語。手元・食材・調理器具のクローズアップ写真風。人物の顔や全身は禁止。例: close-up of chopping onion on wooden board, hands only from wrists, no face"
+      "text": "いま何をするか（1文で行動が分かる）",
+      "detail": "火加減・時間・音や見た目の目安など、初心者が迷わない具体説明（2〜4文）",
+      "why": "この手順が必要な理由（論理的に短く）",
+      "tip": "失敗しにくいコツ",
+      "watchOut": "やりがちな失敗と回避法"
     }
   ],
   "commonQuestions": [
-    {"label": "短い質問ボタン文言", "answer": "やさしい回答"}
+    {"label": "短い質問ボタン文言", "answer": "因果が分かるやさしい回答（2〜4文）"}
   ],
   "encouragement": "完成を励ます短文",
   "enemyTaunt": "この料理でゆるモンスターを倒すイメージの一言"
 }
 
 制約:
-- steps は 4〜7 個
-- commonQuestions は 4〜6 個（火加減、代用、失敗しやすい点など）
-- 初心者向けなら工程を細かく、難易度が高いなら少し挑戦的に
+- steps は 5〜8 個。工程は時系列で論理的に並べる
+- 専門用語は必ず日常語で言い換える（例: 弱火＝とろとろ、小さな泡が出る程度）
+- 「いい感じに」「適量」など曖昧表現を避け、目安を書く
+- commonQuestions は 5〜7 個（火加減、代用、失敗しやすい点、洗い物、保存など）
+- 初心者向けなら工程を細かく、難易度が高いなら少し挑戦的にしつつ説明は丁寧に
 - 危険な生食や非現実的な材料は避ける
-- imagePrompt は英語、テキスト文字入れ禁止
-- imagePrompt は必ず食材・手元・鍋などのクローズアップ。人の顔・全身・キャラクター禁止
-- トーンは明るく親しみやすいが、討伐・バトル感は残す`;
+- トーンは明るく親しみやすいが、討伐・バトル感は残す
+- imagePrompt は不要（出力しない）`;
+
+async function geminiJsonChat(system, user) {
+  const apiKey = geminiApiKey();
+  if (!apiKey) {
+    return { ok: false, error: "GEMINI_API_KEY が未設定です。" };
+  }
+  const model = env("GEMINI_TEXT_MODEL", "gemini-2.0-flash");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: `${system}\n\n---\n\n${user}` }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.4,
+      responseMimeType: "application/json",
+    },
+  };
+
+  try {
+    const res = await geminiHttp(url, apiKey, payload);
+    if (res.status >= 400) {
+      return {
+        ok: false,
+        error: res.json?.error?.message || `Gemini HTTP ${res.status}`,
+      };
+    }
+    const text =
+      res.json?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { ok: false, error: "Gemini の JSON を解釈できませんでした。" };
+    }
+    return { ok: true, data, model };
+  } catch (err) {
+    return { ok: false, error: err.message || "Gemini 接続失敗" };
+  }
+}
+
+async function polishRecipeWithGemini(recipe) {
+  const system = `あなたは料理初心者向けの説明編集者です。
+与えられたレシピJSONの steps / commonQuestions / summary / prepChecklist をより詳しく、論理的で自然な日本語に整えてください。
+意味は変えず、誰でも手が動く説明にしてください。
+必ず元と同じキー構造の JSON だけを返してください。新しい料理に作り直さないでください。
+各 step に text, detail, why, tip, watchOut を充実させてください。`;
+  const user = `レシピJSON:\n${JSON.stringify(recipe)}`;
+  return geminiJsonChat(system, user);
+}
 
 function pingHandler(_req, res) {
   const hasOpenAI = Boolean(openaiApiKey());
@@ -395,8 +452,9 @@ function pingHandler(_req, res) {
     has_openai_key: hasOpenAI,
     has_gemini_key: hasGemini,
     openai_model: env("OPENAI_MODEL", "gpt-4o-mini"),
-    gemini_image_model: env("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
-    image_provider: env("IMAGE_PROVIDER", "auto"),
+    gemini_text_model: env("GEMINI_TEXT_MODEL", "gemini-2.0-flash"),
+    enemy_images: "pollinations",
+    step_images: false,
     hint: hasOpenAI
       ? null
       : "OPENAI_API_KEY を Environment に追加してください（OPENAI_MODEL だけではレシピ提案できません）。",
@@ -458,13 +516,39 @@ app.post(["/api/suggest", "/api/suggest.php"], upload.none(), async (req, res) =
       return res.status(502).json(result);
     }
 
-    const data = result.data || {};
+    let data = result.data || {};
+    let polishedBy = null;
+
+    // Gemini（テキスト）で説明をさらに分かりやすく整える
+    if (geminiApiKey()) {
+      const polished = await polishRecipeWithGemini(data);
+      if (polished.ok && polished.data) {
+        const p = polished.data;
+        if (Array.isArray(p.steps) && p.steps.length) data.steps = p.steps;
+        if (Array.isArray(p.commonQuestions) && p.commonQuestions.length) {
+          data.commonQuestions = p.commonQuestions;
+        }
+        if (typeof p.summary === "string" && p.summary.trim()) data.summary = p.summary;
+        if (Array.isArray(p.prepChecklist) && p.prepChecklist.length) {
+          data.prepChecklist = p.prepChecklist;
+        }
+        polishedBy = polished.model || "gemini";
+      }
+    }
+
     data.difficulty = clampInt(data.difficulty ?? difficulty, 1, 10, difficulty);
     if (!Number.isFinite(Number(data.cookPower))) {
       data.cookPower = data.difficulty * 12 + 8;
     }
     data.cookPower = clampInt(data.cookPower, 10, 200, data.difficulty * 12 + 8);
-    return res.json({ ok: true, recipe: data });
+    return res.json({
+      ok: true,
+      recipe: data,
+      providers: {
+        draft: "openai",
+        polish: polishedBy,
+      },
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: err.message || "サーバーエラー" });
@@ -491,55 +575,39 @@ app.post(["/api/ask", "/api/ask.php"], upload.none(), async (req, res) => {
       difficulty: recipe.difficulty || 1,
     });
 
-    const system = `あなたは CookQuest の料理師匠です。提示されたレシピについて、初心者にもわかる日本語で短く丁寧に答えてください。
+    const system = `あなたは CookQuest の料理師匠です。
+提示されたレシピについて、初心者にもわかる日本語で丁寧に答えてください。
+結論→理由→具体的なやり方の順で、論理的かつ自然に書いてください。
 必ず JSON のみで返答:
 {
-  "answer": "回答本文",
-  "quickTips": ["短い追加ヒント", "..."],
-  "imagePrompt": "任意。英語。食材・手元・調理器具のクローズアップのみ。顔・全身禁止。不要なら空文字"
+  "answer": "回答本文（3〜8文。専門用語は言い換え）",
+  "quickTips": ["短い追加ヒント", "..."]
 }
-危険・非衛生な助言はしない。わからないことは無理に断定しない。`;
+危険・非衛生な助言はしない。わからないことは無理に断定しない。画像は不要。`;
+
+    // 質問は Gemini テキスト優先、だめなら OpenAI
+    if (geminiApiKey()) {
+      const gemini = await geminiJsonChat(
+        system,
+        `レシピ:\n${recipeJson}\n\n質問:\n${question}`
+      );
+      if (gemini.ok) {
+        return res.json({ ok: true, reply: gemini.data, provider: "gemini" });
+      }
+    }
 
     const result = await openaiChat(
       [
         { role: "system", content: system },
         { role: "user", content: `レシピ:\n${recipeJson}\n\n質問:\n${question}` },
       ],
-      0.5
+      0.4
     );
 
     if (!result.ok) {
       return res.status(502).json(result);
     }
-    return res.json({ ok: true, reply: result.data });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: err.message || "サーバーエラー" });
-  }
-});
-
-app.all(["/api/gemini-image", "/api/gemini-image.php"], upload.none(), async (req, res) => {
-  try {
-    const isTest = "test" in (req.query || {});
-    const body = readBody(req);
-    let prompt = String(body.prompt || "").trim();
-    let kind = String(body.kind || "step").trim() || "step";
-
-    if (isTest && !prompt) {
-      prompt =
-        "Close-up photo of fresh vegetables and a kitchen knife on a wooden cutting board, no people, no faces, no text";
-      kind = "step";
-    }
-    if (!prompt) {
-      return res.status(400).json({ ok: false, error: "prompt が空です。" });
-    }
-
-    const result = await generateImage(prompt, kind);
-    if (!result.ok) {
-      return res.status(502).json(result);
-    }
-    if (isTest) result.test = true;
-    return res.json(result);
+    return res.json({ ok: true, reply: result.data, provider: "openai" });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: err.message || "サーバーエラー" });

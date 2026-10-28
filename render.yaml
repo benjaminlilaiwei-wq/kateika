@@ -12,9 +12,7 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
-      - key: GEMINI_IMAGE_MODEL
-        value: gemini-2.5-flash-image
-      - key: IMAGE_PROVIDER
-        value: auto
+      - key: GEMINI_TEXT_MODEL
+        value: gemini-2.0-flash
       - key: NODE_VERSION
         value: "20"

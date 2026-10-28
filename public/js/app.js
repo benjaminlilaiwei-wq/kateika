@@ -85,38 +85,12 @@
         "接続OK",
         data.has_openai_key || data.has_api_key ? "OPENAI_API_KEYあり" : "OPENAI_API_KEYなし",
         data.has_gemini_key ? "GEMINI_API_KEYあり" : "GEMINI_API_KEYなし",
-        `画像=${data.image_provider || "auto"}`,
+        "敵画像=Pollinations",
+        "手順画像=なし",
       ];
       toast(bits.join(" / ") + (data.hint ? ` / ${data.hint}` : ""), 7000);
     } catch (err) {
       toast(err.message || "接続チェック失敗");
-    }
-  }
-
-  async function testGeminiImage() {
-    if (location.protocol === "file:") {
-      toast("公開URLで開いてからテストしてね。");
-      return;
-    }
-    toast("画像生成をテスト中…（最大1分）", 8000);
-    try {
-      const res = await fetch(apiUrl("api/gemini-image?test=1"), {
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      const text = await res.text();
-      const data = JSON.parse(text);
-      if (!data.ok) {
-        throw new Error(data.error || "失敗");
-      }
-      const via = data.provider || "unknown";
-      toast(
-        via === "pollinations"
-          ? `画像OK（Pollinations代替 / Gemini枠なし）`
-          : `画像OK（${via}${data.model ? " / " + data.model : ""}）`
-      );
-    } catch (err) {
-      toast(err.message || "画像テスト失敗", 8000);
     }
   }
 
@@ -145,13 +119,10 @@
     $("#home-enemy-hp-fill").style.width = `${Math.max(0, (enemy.hp / enemy.maxHp) * 100)}%`;
     const img = $("#home-enemy-img");
     img.alt = enemy.displayName;
-    const prompt = window.CQImages.enemyPrompt(enemy);
     const tag = `${enemy.id || enemy.name}:${g.enemySeed}`;
     if (img.dataset.enemyTag === tag && img.getAttribute("src")) return;
     img.dataset.enemyTag = tag;
-    img.removeAttribute("src");
-    img.classList.remove("loaded");
-    window.CQImages.enqueuePrompt(img, prompt, "enemy", null);
+    window.CQImages.loadEnemy(img, enemy, g.enemySeed);
   }
 
   /* -------- Mood -------- */
@@ -327,60 +298,42 @@
     $("#recipe-encourage").textContent = recipe.encouragement || "ゆっくりで大丈夫。完成が勝ちだ。";
     $("#recipe-enemy-taunt").textContent = recipe.enemyTaunt || g.enemy.flavor;
 
+    const prep = $("#recipe-prep");
+    const prepList = $("#recipe-prep-list");
+    if (Array.isArray(recipe.prepChecklist) && recipe.prepChecklist.length) {
+      prepList.innerHTML = recipe.prepChecklist.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+      prep.classList.remove("hidden");
+    } else {
+      prepList.innerHTML = "";
+      prep.classList.add("hidden");
+    }
+
     $("#recipe-ingredients").innerHTML = (recipe.ingredients || [])
       .map((ing) => `<li>${escapeHtml(ing)}</li>`)
       .join("");
 
-    window.CQImages.clearQueue();
-
     $("#recipe-steps").innerHTML = (recipe.steps || [])
       .map((step, i) => {
         const order = step.order || i + 1;
-        const prompt = window.CQImages.stepPrompt(step.imagePrompt);
-        // Geminiなら多めに自動、Pollinations時は2枚まで
-        const auto = window.CQImages.provider === "gemini" ? i < 4 : i < 2;
+        const why = step.why ? `<p class="step-why">なぜ: ${escapeHtml(step.why)}</p>` : "";
+        const detail = step.detail ? `<p class="step-detail">${escapeHtml(step.detail)}</p>` : "";
+        const watch = step.watchOut ? `<p class="step-watch">注意: ${escapeHtml(step.watchOut)}</p>` : "";
         return `
           <li>
             <span class="step-num">Step ${order}</span>
-            <div>${escapeHtml(step.text || "")}</div>
+            <div class="step-text">${escapeHtml(step.text || "")}</div>
+            ${detail}
+            ${why}
             ${step.tip ? `<p class="tip">ヒント: ${escapeHtml(step.tip)}</p>` : ""}
-            <div class="step-img-slot" data-img-prompt="${escapeAttr(prompt)}" data-auto="${auto ? "1" : "0"}">
-              <p class="step-img-status"></p>
-              <img alt="手順${order}のイメージ（食材・手元）" hidden />
-              ${auto ? "" : `<button type="button" class="btn btn-ghost step-img-btn">この手順の画像を見る</button>`}
-            </div>
+            ${watch}
           </li>`;
       })
       .join("");
 
-    $$(".step-img-slot").forEach((slot) => {
-      const img = slot.querySelector("img");
-      const status = slot.querySelector(".step-img-status");
-      const btn = slot.querySelector(".step-img-btn");
-      const prompt = slot.dataset.imgPrompt;
-      const start = () => {
-        if (btn) {
-          btn.disabled = true;
-          btn.textContent = "順番待ち…";
-        }
-        window.CQImages.enqueuePrompt(img, prompt, "step", status);
-      };
-      if (slot.dataset.auto === "1") start();
-      else if (btn) btn.addEventListener("click", start);
-    });
-
     $("#recipe-enemy-name").textContent = g.enemy.displayName;
     $("#recipe-enemy-hp-text").textContent = `${g.enemy.hp} / ${g.enemy.maxHp}`;
     $("#recipe-enemy-hp-fill").style.width = `${(g.enemy.hp / g.enemy.maxHp) * 100}%`;
-    const recipeEnemyImg = $("#recipe-enemy-img");
-    recipeEnemyImg.removeAttribute("src");
-    recipeEnemyImg.classList.remove("loaded");
-    window.CQImages.enqueuePrompt(
-      recipeEnemyImg,
-      window.CQImages.enemyPrompt(g.enemy),
-      "enemy",
-      null
-    );
+    window.CQImages.loadEnemy($("#recipe-enemy-img"), g.enemy, g.enemySeed);
 
     const faq = $("#faq-buttons");
     const questions = recipe.commonQuestions || [];
@@ -428,18 +381,8 @@
       const tips = Array.isArray(reply.quickTips)
         ? `<ul>${reply.quickTips.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
         : "";
-      const hasImg = reply.imagePrompt && String(reply.imagePrompt).trim();
-      box.innerHTML = `<strong>${escapeHtml(q)}</strong><p>${escapeHtml(reply.answer || "")}</p>${tips}${
-        hasImg
-          ? `<div class="step-img-slot ask-img-slot"><p class="step-img-status"></p><img alt="説明イメージ（食材・手元）" hidden /></div>`
-          : ""
-      }`;
-      if (hasImg) {
-        const slot = box.querySelector(".ask-img-slot");
-        const img = slot.querySelector("img");
-        const status = slot.querySelector(".step-img-status");
-        window.CQImages.enqueuePrompt(img, window.CQImages.stepPrompt(reply.imagePrompt), "step", status);
-      }
+      const via = data.provider ? `<p class="ask-via">回答: ${escapeHtml(data.provider)}</p>` : "";
+      box.innerHTML = `<strong>${escapeHtml(q)}</strong><p>${escapeHtml(reply.answer || "")}</p>${tips}${via}`;
     } catch (err) {
       box.innerHTML = `<p>${escapeHtml(err.message || "エラーが発生しました")}</p>`;
     } finally {
@@ -461,15 +404,7 @@
     void visual.offsetWidth;
     visual.classList.add("hit");
 
-    const battleImg = $("#battle-enemy-img");
-    battleImg.removeAttribute("src");
-    battleImg.classList.remove("loaded");
-    window.CQImages.enqueuePrompt(
-      battleImg,
-      window.CQImages.enemyPrompt(result.prevEnemy),
-      "enemy",
-      null
-    );
+    window.CQImages.loadEnemy($("#battle-enemy-img"), result.prevEnemy, result.prevEnemySeed);
     $("#damage-float").textContent = `-${result.damage}`;
     $("#damage-float").classList.remove("show");
     void $("#damage-float").offsetWidth;
@@ -547,9 +482,6 @@
         break;
       case "check-connection":
         checkConnection();
-        break;
-      case "test-gemini-image":
-        testGeminiImage();
         break;
       default:
         break;
